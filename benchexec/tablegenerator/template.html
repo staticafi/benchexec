@@ -231,7 +231,7 @@
 <td class="{{ccsclass}}">{{value}}</td>
     {{endif}}
   {{else}}
-<td class="{{ccsclass}}">{{format_value(value, column, True, 'html_cell')|html}}</td>
+<td class="{{ccsclass}}" data-raw_value="{{split_number_and_unit(value)[0]}}" data-unit="{{split_number_and_unit(value)[1]}}">{{format_value(value, column, True, 'html_cell')|html}}</td>
   {{endif}}
   {{endfor}}
   {{endfor}}
