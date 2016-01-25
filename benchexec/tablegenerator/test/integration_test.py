@@ -39,8 +39,10 @@ tablegenerator = os.path.join(bin_dir, 'table-generator')
 # Use this to update expected files if necessary. Do not commit this flag set to True!
 OVERWRITE_MODE = False
 
+
 def result_file(name):
     return os.path.join(here, 'results', name)
+
 
 class TableGeneratorIntegrationTests(unittest.TestCase):
 
@@ -170,11 +172,23 @@ class TableGeneratorIntegrationTests(unittest.TestCase):
             'simple-table-with-columns.table',
             )
 
+    def test_simple_table_xml_with_links(self):
+        self.generate_tables_and_compare_content(
+            ['-x', os.path.join(here, 'simple-table-with-links.xml')],
+            'simple-table-with-links.table',
+            )
+
     def test_simple_table_xml_with_numberOfDigits(self):
         self.generate_tables_and_compare_content(
             ['-x', os.path.join(here, 'simple-table-with-numberOfDigits.xml')],
             'simple-table-with-numberOfDigits.table',
             )
+
+    def test_simple_table_xml_with_scaling(self):
+        self.generate_tables_and_compare_content(
+            ['-x', os.path.join(here, 'simple-table-with-scaling.xml')],
+            'simple-table-with-scaling.table',
+        )
 
     def test_multi_table(self):
         self.generate_tables_and_compare_content(

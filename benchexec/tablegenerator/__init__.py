@@ -40,12 +40,12 @@ import tempita
 from benchexec import __version__
 import benchexec.result as result
 from benchexec.tablegenerator import util as Util
+from benchexec.tablegenerator.columns import Column, ColumnMeasureType, ColumnType
 
 # Process pool for parallel work.
 # Some of our loops are CPU-bound (e.g., statistics calculations), thus we use
 # processes, not threads.
 # Initialized only in main() because we cannot do so in the worker processes.
-from benchexec.tablegenerator.util import ColumnType
 
 parallel = None
 
@@ -66,20 +66,18 @@ TEMPLATE_NAMESPACE={
    'json': Util.to_json,
    'create_link': Util.create_link,
    'format_options': Util.format_options,
-   'format_value': Util.format_value,
-   'split_number_and_unit': Util.split_number_and_unit,
-   'remove_unit': Util.remove_unit,
    }
 
 _BYTE_FACTOR = 1000 # bytes in a kilobyte
 
 # Compile regular expression for detecting measurements only once.
-REGEX_MEASURE = re.compile('([-\+])?(\d+)(\.(0*)\d+)?\s?([a-zA-Z]*)')
+REGEX_MEASURE = re.compile('([-\+])?(\d+)(\.(0*)(\d+))?\s?([a-zA-Z]*)')
 GROUP_SIGN = 1
 GROUP_INT_PART = 2
 GROUP_DEC_PART = 3
 GROUP_ZEROES = 4
-GROUP_UNIT = 5
+GROUP_SIG_DEC_PART = 5
+GROUP_UNIT = 6
 
 
 def parse_table_definition_file(file, options):
@@ -110,7 +108,7 @@ def parse_table_definition_file(file, options):
         logging.error("Table file %s is invalid: It's root element is not named 'table'.", file)
         exit(1)
 
-    defaultColumnsToShow = extract_columns_from_table_definition_file(tableGenFile)
+    defaultColumnsToShow = extract_columns_from_table_definition_file(tableGenFile, file)
 
     return Util.flatten(
         parallel.map(
@@ -121,11 +119,17 @@ def parse_table_definition_file(file, options):
             itertools.repeat(options)))
 
 
-def extract_columns_from_table_definition_file(xmltag):
+def extract_columns_from_table_definition_file(xmltag, table_definition_file):
     """
     Extract all columns mentioned in the result tag of a table definition file.
     """
-    return [Column(c.get("title"), c.text, c.get("numberOfDigits"), c.get("href"))
+    def handle_path(path):
+        """Convert path from a path relative to table-definition file."""
+        if not path or path.startswith("http://") or path.startswith("https://"):
+            return path
+        return os.path.join(os.path.dirname(table_definition_file), path)
+
+    return [Column(c.get("title"), c.text, c.get("numberOfDigits"), handle_path(c.get("href")), None, c.get("displayUnit"), c.get("scaleFactor"))
             for c in xmltag.findall('column')]
 
 
@@ -140,16 +144,26 @@ def _get_decimal_digits(decimal_number_match, number_of_significant_digits):
     @return: the number of decimal digits of the given decimal number match's representation, after expanding
         the number to the required amount of significant digits
     """
-    num_of_digits = number_of_significant_digits
-
-    if num_of_digits is None:
+    try:
+        num_of_digits = int(number_of_significant_digits)
+    except TypeError:
         num_of_digits = DEFAULT_NUMBER_OF_SIGNIFICANT_DIGITS
 
-    if int(decimal_number_match.group(GROUP_INT_PART)) == 0:
+    # If 1 > value > 0, only look at the decimal digits.
+    # In the second condition, we have to remove the first character from the decimal part group because the
+    # first character always is '.'
+    if int(decimal_number_match.group(GROUP_INT_PART)) == 0\
+            and int(decimal_number_match.group(GROUP_DEC_PART)[1:]) != 0:
+
+        max_num_of_digits = len(decimal_number_match.group(GROUP_SIG_DEC_PART))
+        num_of_digits = min(num_of_digits, max_num_of_digits)
         # number of needed decimal digits = number of zeroes after decimal point + significant digits
         curr_dec_digits = len(decimal_number_match.group(GROUP_ZEROES)) + int(num_of_digits)
 
     else:
+        max_num_of_digits =\
+            len(decimal_number_match.group(GROUP_INT_PART)) + len(decimal_number_match.group(GROUP_DEC_PART))
+        num_of_digits = min(num_of_digits, max_num_of_digits)
         # number of needed decimal digits = significant digits - number of digits in front of decimal point
         curr_dec_digits = int(num_of_digits) - len(decimal_number_match.group(GROUP_INT_PART))
 
@@ -157,70 +171,71 @@ def _get_decimal_digits(decimal_number_match, number_of_significant_digits):
 
 
 def _get_column_type_heur(column, column_values):
+    text_type_tuple = ColumnType.text, None
+
     if "status" in column.title:
         if column.title == "status":
-            return ColumnType.main_status
+            return ColumnType.main_status, None
         else:
-            return ColumnType.status
+            return ColumnType.status, None
 
     column_type = None
+    column_unit = column.unit
+
+    if column_unit:
+        explicit_unit_defined = True
+    else:
+        explicit_unit_defined = False
+
+    if int(column.scale_factor) != column.scale_factor:
+        column_type = ColumnMeasureType(0)
     for value in column_values:
 
-        if not value or value == '' or value == '-':
+        if value is None or value == '':
             continue
 
-        # Heuristic for detecting the column type.
-        # The regex matches any number and provides the following groups:
-        # Group 1: The sign - or + (optional)
-        # Group 2: The value as an integer
-        #   (i.e. all digits in front of the decimal point, if one exists. Otherwise the whole number)
-        # Group 3: The decimal point and all following digits (this part is optional)
-        # Group 4: The number of consecutive 0's following the decimal point directly
-        #   (an optional subset of Group 2)
-        # Group 5: The unit of the value (optional)
-        #
-        # Example: Matching '18.00301 ms' results in:
-        #   Group 1: ''
-        #   Group 2: '18'
-        #   Group 3: '.00301'
-        #   Group 4: '00'
-        #   Group 5: 'ms'
-        # Use these groups to derive the type (see comments for each if-statement below)
         value_match = REGEX_MEASURE.match(str(value))
 
         # As soon as one row's value is no number, the column type is 'text'
         if value_match is None:
-            return ColumnType.text
+            return text_type_tuple
 
-        # If all rows are integers, column type is 'count'
-        elif not value_match.group(GROUP_DEC_PART) and (not column_type or column_type.get_type() == ColumnType.count):
-            column_unit = value_match.group(GROUP_UNIT)
+            # If all rows are integers, column type is 'count'
+        elif not value_match.group(GROUP_DEC_PART) and (not column_type or column_type.type == ColumnType.count):
+            curr_column_unit = value_match.group(GROUP_UNIT)
 
-            if column_type:
-                assert column_type.get_type() == ColumnType.count
-                existing_column_unit = column_type.get_unit()
-
-                # if the units in two different rows of the same column differ, handle the column as 'text' type
-                if column_unit != existing_column_unit:
-                    return ColumnType.text
-
+            # if the units in two different rows of the same column differ, handle the column as 'text' type
+            if column_unit and curr_column_unit and curr_column_unit != column_unit:
+                if explicit_unit_defined:
+                    raise TypeError("Values of different units in same column: " + str(column_unit) + " and " + str(curr_column_unit))
+                else:
+                    return text_type_tuple
             else:
-                column_type = Util.ColumnCountType(column_unit)
+                column_type = ColumnType.count
+                column_unit = curr_column_unit
 
         # If at least one row contains a decimal and all rows are numbers, column type is 'measure'
-        elif value_match.group(GROUP_DEC_PART) and not (column_type and column_type.get_type() == ColumnType.text):
-            column_unit = value_match.group(GROUP_UNIT)
+        elif not (column_type and column_type.type == ColumnType.text):
+            curr_column_unit = value_match.group(GROUP_UNIT)
 
-            if column_type:
-                existing_column_unit = column_type.get_unit()
-
-                # if the units in two different rows of the same column differ, handle the column as 'text' type
-                if column_unit != existing_column_unit:
-                    return ColumnType.text
+            # if the units in two different rows of the same column differ, handle the column as 'text' type
+            if curr_column_unit:
+                if column_unit and curr_column_unit != column_unit:
+                    if explicit_unit_defined:
+                        raise TypeError("Values of different units in same column: " + str(column_unit) + " and " + str(curr_column_unit))
+                    else:
+                        return text_type_tuple
+                else:
+                    column_unit = curr_column_unit
 
             # Compute the number of decimal digits of the current value, considering the number of significant
             # digits for this column.
-            curr_dec_digits = _get_decimal_digits(value_match, column.number_of_significant_digits)
+            # Use the column's scale factor for computing the decimal digits of the current value.
+            # Otherwise, they might be different from output.
+            scaled_value = float(Util.remove_unit(str(value))) * column.scale_factor
+            scaled_value_match = REGEX_MEASURE.match(str(scaled_value))
+
+            curr_dec_digits = _get_decimal_digits(scaled_value_match, column.number_of_significant_digits)
             try:
                 max_dec_digits = column_type.max_decimal_digits
             except AttributeError or TypeError:
@@ -229,35 +244,38 @@ def _get_column_type_heur(column, column_values):
             if curr_dec_digits > max_dec_digits:
                 max_dec_digits = curr_dec_digits
 
-            column_type = Util.ColumnMeasureType(column_unit, max_dec_digits)
+            column_type = ColumnMeasureType(max_dec_digits)
 
-    return column_type if column_type else ColumnType.text
+    if column_type:
+        return column_type, column_unit
+    else:
+        return text_type_tuple
+
 
 def get_column_type(column, result_set):
     """
     Returns the type of the given column based on its row values on the given RunSetResult.
     @param column: the column to return the correct ColumnType for
     @param result_set: the RunSetResult to consider
-    @return: a type object describing the column - the concrete ColumnType can be returned by using get_type() on it
+    @return: a tuple of a type object describing the column - the concrete ColumnType is stored in the attribute 'type'
+        - and the unit of the column, which may be None.
     """
 
     # This is actually checked in _get_column_type_heur(..), too.
     # But we do this here already so we do not have to create the column_values list for status columns unnecessarily.
     if "status" in column.title:
         if column.title == "status":
-            return ColumnType.main_status
+            return ColumnType.main_status, None
         else:
-            return ColumnType.status
+            return ColumnType.status, None
 
     # If the column is not a 'status' column, we have to guess the type based on its rows' values.
     column_values = [run_result.values[run_result.columns.index(column)] for run_result in result_set.results if column in run_result.columns]
-    column_type = _get_column_type_heur(column, column_values)
-
-    return column_type
+    return _get_column_type_heur(column, column_values)
 
 
 def is_number_type(column_type):
-    col_type = column_type.get_type()
+    col_type = column_type.type
 
     return col_type == ColumnType.measure or col_type == ColumnType.count
 
@@ -266,8 +284,8 @@ def get_column_output_title(column):
     column_title = column.title
     column_type = column.type
 
-    if is_number_type(column_type) and column_type.get_unit():
-        column_title += " (" + str(column_type.get_unit()) + ")"
+    if is_number_type(column_type) and column.unit:
+        column_title += " (" + str(column.unit) + ")"
 
     return column_title
 
@@ -281,13 +299,13 @@ def handle_tag_in_table_definition_file(tag, table_file, defaultColumnsToShow, o
 
     results = [] # default value for results
     if tag.tag == 'result':
-        columnsToShow = extract_columns_from_table_definition_file(tag) or defaultColumnsToShow
+        columnsToShow = extract_columns_from_table_definition_file(tag, table_file) or defaultColumnsToShow
         run_set_id = tag.get('id')
         for resultsFile in get_file_list(tag):
             results.append(load_result(resultsFile, options, run_set_id, columnsToShow))
 
     elif tag.tag == 'union':
-        columnsToShow = extract_columns_from_table_definition_file(tag) or defaultColumnsToShow
+        columnsToShow = extract_columns_from_table_definition_file(tag, table_file) or defaultColumnsToShow
         result = RunSetResult([], collections.defaultdict(list), columnsToShow)
 
         for resultTag in tag.findall('result'):
@@ -320,20 +338,6 @@ def get_task_id(task):
                ]
     return tuple(task_id)
 
-
-class Column(object):
-    """
-    The class Column contains title, pattern (to identify a line in log_file),
-    number_of_significant_digits of a column, the type of the column's values,
-    and href (to create a link to a resource).
-    It does NOT contain the value of a column.
-    """
-    def __init__(self, title, pattern, numOfDigits, href):
-        self.title = title
-        self.pattern = pattern
-        self.number_of_significant_digits = numOfDigits
-        self.type = None
-        self.href = href
 
 loaded_tools = {}
 
@@ -422,7 +426,7 @@ class RunSetResult(object):
                                                           correct_only))
 
         for column in self.columns:
-            column.type = get_column_type(column, self)
+            column.type, column.unit = get_column_type(column, self)
 
 
         del self._xml_results
@@ -464,7 +468,6 @@ class RunSetResult(object):
                         columnNames.add(title)
                         columns.append(Column(title, None, None, None))
             return columns
-
 
     @staticmethod
     def _extract_attributes_from_result(resultFile, resultTag):
@@ -700,7 +703,8 @@ class RunResult(object):
         category = Util.get_column_value(sourcefileTag, 'category', result.CATEGORY_MISSING)
         score = result.score_for_task(sourcefileTag.get('name'),
                                       sourcefileTag.get('properties', '').split(),
-                                      category)
+                                      category,
+                                      status)
         logfileLines = None
 
         values = []
@@ -901,11 +905,14 @@ def select_relevant_id_columns(rows):
     return relevant_id_columns
 
 
-def get_stats(rows):
-    stats_and_col_types = list(parallel.map(get_stats_of_run_set, rows_to_columns(rows)))  # column-wise
-    stats = stats_and_col_types[0][0] # first tuple returned by get_stats_of_run_set
-    stats_columns = stats_and_col_types[0][1] # second tuple returned by get_stats_of_run_set
-    rowsForStats = list(map(Util.flatten, zip(stats)))  # row-wise
+def get_stats_of_rows(rows):
+    if parallel:
+        stats_and_col_types = list(parallel.map(get_stats_of_run_set, rows_to_columns(rows)))  # column-wise
+    else:
+        stats_and_col_types = list(map(get_stats_of_run_set, rows_to_columns(rows)))
+    stats = [s[0] for s in stats_and_col_types]  # first tuple returned by get_stats_of_run_set
+    stats_columns = [s[1] for s in stats_and_col_types]  # second tuple returned by get_stats_of_run_set
+    rowsForStats = list(map(Util.flatten, zip(*stats)))  # row-wise
 
     # Calculate maximal score and number of true/false files for the given properties
     count_true = count_false = max_score = 0
@@ -920,7 +927,13 @@ def get_stats(rows):
             count_true += 1
         elif correct_result is False:
             count_false += 1
-        max_score += result.score_for_task(row.filename, row.properties, result.CATEGORY_CORRECT)
+        max_score += result.score_for_task(row.filename, row.properties, result.CATEGORY_CORRECT, None)
+
+    return rowsForStats, max_score, count_true, count_false, stats_columns
+
+def get_stats(rows):
+    rowsForStats, max_score, count_true, count_false, stats_columns = get_stats_of_rows(rows)
+
     task_counts = 'in total {0} true tasks, {1} false tasks'.format(count_true, count_false)
 
     if max_score:
@@ -969,14 +982,14 @@ def get_stats_of_run_set(runResults):
 
     status_col_index = 0  # index of 'status' column
     for index, (column, values) in enumerate(zip(columns, listsOfValues)):
-        col_type = column.type.get_type()
+        col_type = column.type.type
         if col_type != ColumnType.text:
             if col_type == ColumnType.main_status or col_type == ColumnType.status:
                 if col_type == ColumnType.main_status:
                     status_col_index = index
                     score = StatValue(sum(run_result.score for run_result in runResults))
                 else:
-                    score = ''
+                    score = None
 
                 total   = StatValue(len([runResult.values[index] for runResult in runResults if runResult.status]))
 
@@ -1001,12 +1014,12 @@ def get_stats_of_run_set(runResults):
                 total, correct, correctTrue, correctFalse, incorrect, wrongTrue, wrongFalse =\
                     get_stats_of_number_column(values, main_status_list, column.title)
 
-                score = ''
+                score = None
 
-        else:  # Fill text columns with '-'s
+        else:
             total, correct, correctTrue, correctFalse, incorrect, wrongTrue, wrongFalse =\
                 (None, None, None, None, None, None, None)
-            score = ''
+            score = None
 
         totalRow.append(total)
         correctRow.append(correct)
@@ -1039,9 +1052,8 @@ def get_stats_of_run_set(runResults):
     stats_columns = []
     for i, column in enumerate(columns):
         column_values = [totalRow[i], correctRow[i], correctTrueRow[i], correctFalseRow[i], incorrectRow[i], wrongTrueRow[i], wrongFalseRow[i], scoreRow[i]]
-        column_type = _get_column_type_heur(column, column_values)
-        new_column = Column(column.title, column.pattern, column.number_of_significant_digits, column.href)
-        new_column.type = column_type
+        column_type, column_unit = _get_column_type_heur(column, column_values)
+        new_column = Column(column.title, column.pattern, column.number_of_significant_digits, column.href, column_type, column_unit, column.scale_factor)
         stats_columns.append(new_column)
 
     return stats, stats_columns
@@ -1189,12 +1201,12 @@ def get_summary(runSetResults):
 
                 available = True
                 try:
-                    value = Util.to_decimal(runSetResult.summary[column.title])
+                    value = StatValue(Util.to_decimal(runSetResult.summary[column.title]))
                 except InvalidOperation:
-                    value = '-'
+                    value = None
             else:
-                value = '-'
-            summaryStats.append(StatValue(value))
+                value = None
+            summaryStats.append(value)
 
     if available:
         return tempita.bunch(id=None, title='local summary',
@@ -1252,7 +1264,7 @@ def create_tables(name, runSetResults, rows, rowsDiff, outputPath, outputFilePat
                 if summary:
                     stats.insert(1, summary)
 
-            template_values.foot_columns = [stats_columns]
+            template_values.foot_columns = stats_columns
         else:
             stats = None
             template_values.foot_columns = None

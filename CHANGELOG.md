@@ -1,5 +1,64 @@
 # BenchExec Changelog
 
+## BenchExec 1.7
+
+- Fix `table-generator` behavior for columns where different cells have different units:
+  The release notes for 1.6 claimed that these columns are treated as text column,
+  when instead they were rejected. Now they are treated as text.
+  Note that BenchExec does not create such columns itself, so this should not affect most users.
+- Fix computation of scores according to the SV-COMP scoring scheme:
+  if the expected result is for example `false(valid-deref)` and the tool returns `false(valid-free)`,
+  the resulting score is the one for a wrong false answer (-16 points),
+  not the one for a wrong true answer (-32 points).
+  The latter score is only given if the tool actually answers `true` incorrectly.
+- Change result classification, if the returned answer does not belong to the property of the task,
+  for example, if the tool returns `true` instead of `sat` for a task with category `satisfiability`,
+  or if the tool returns `false(no-overflow)` when it should not even check for overflows.
+  Now these results are classified as unknown (with score 0),
+  previously these were treated as wrong answers.
+- Fix escaping of links in HTML tables, e.g., to log files with special characters in their name.
+  This was broken in 1.6.
+
+## BenchExec 1.6
+
+This release brings several improvements to `table-generator`:
+- `table-generator` now rounds measurement values in a scientifically correct way,
+  i.e., with a fixed number of significant digits, not with a fixed number of decimal places.
+  The attribute `numberOfDigits` of `<column>` tags in table-definition files
+  now also specifies significant digits, not decimal places.
+  By default, in HTML tables all fractional values are now rounded (e.g., time measurements)
+  and all integer values continue without rounding (e.g., memory measurements),
+  previously only "time" columns were rounded.
+  The remaining rounding-related behavior stays unchanged:
+  In CSV tables, values are not rounded by default,
+  and if `numberOfDigits` is explicitly given for a column,
+  it's value will always be rounded in both HTML and CSV tables.
+- `table-generator` now automatically extracts units from the cells in a column
+  and puts them into the table header.
+- In HTML tables, numeric values are now aligned at the decimal point,
+  and text values are left aligned (previously both were right aligned).
+- `table-generator` now allows to convert values from one unit into another.
+  So far this is only implemented for values that do not have a unit attached to them,
+  and both the target unit and the scale factor need to be specified explicitly
+  in the `<column>` tag.
+  This can be used for example to show memory measurements in MB instead of Bytes in tables.
+- `table-generator` now allows columns with links to arbitrary files to be added to tables.
+- `table-generator` does not handle columns where cells have differing units wrongly anymore.
+  Previously, the unit was simply dropped, leading to wrong values for statistics.
+  Now such columns are treated as text and no statistics are generated.
+  (Note that BenchExec never creates such columns by itself,
+  only if values are extracted from the tool output this could happen).
+
+Other changes:
+- The behavior of `benchexec --timelimit` was changed slightly,
+  if a value for `hardtimelimit` was given in the benchmark-definition file.
+  If a time limit is specified on the command line, this now overrides both soft and hard time limit.
+- Implementation of tool-info modules got easier because the `test_tool_info` helper got improved
+  (it now allows to test the function for extracting results from tool outputs).
+- Several tool-info modules of tools participating in SV-COMP got improved.
+- Simplified cgroups setup for systemd systems.
+- Improved documentation.
+
 ## BenchExec 1.5
 
 - Improved definition of time and memory limits:

@@ -55,18 +55,21 @@ acceptable, though there have been performance improvements for the memory
 controller in version 3.3, and cgroups in general are still getting improved, thus,
 using a recent kernel is a good idea.
 
-### Warning for Users of Ubuntu 14.04
+### Warning for Users of Linux Kernel up to 3.13 (e.g., Ubuntu 14.04)
 
-There is a problem in the Linux kernel 3.13 used by Ubuntu 14.04.
-If the cgroup option `memory.use_hierarchy` is enabled,
-the kernel sporadically crashes
-with the message `BUG: soft lockup` in `/var/log/kern.org`
-when the benchmarked process hits its memory limit,
-and needs to be rebooted.
+There is a race condition in the Linux kernel up to version 3.13
+that sometimes causes the machine to freeze if a process hits its memory limit
+([blog post with description](https://community.nitrous.io/posts/stability-and-a-linux-oom-killer-bug),
+[commits fixing it](https://git.kernel.org/cgit/linux/kernel/git/torvalds/linux.git/log/?id=4d4048be8a93769350efa31d2482a038b7de73d0&qt=range&q=9853a407b97d8d066b5a865173a4859a3e69fd8a...4d4048be8a93769350efa31d2482a038b7de73d0),
+[entry in Ubuntu bug tracker](https://bugs.launchpad.net/ubuntu/+source/linux/+bug/1510196)).
+The kernel log then contains messages like `BUG: soft lookup`
+and `Memory cgroup out of memory` or similar immediately before the crash,
+and the machine needs to be rebooted.
 
-If you use Ubuntu 14.04 with `memory.use_hierarchy`,
-please upgrade to kernel 3.16 or newer, which is not affected,
-using the officially supported
+So far we have experienced this only if the cgroup option `memory.use_hierarchy` is enabled.
+Thus, if you use kernel 3.13 or older with `memory.use_hierarchy`,
+please upgrade or make sure your kernel contains the above fixes.
+For Ubuntu 14.04, upgrading can be done using the officially supported
 [Ubuntu LTS Hardware Enablement Stack](https://wiki.ubuntu.com/Kernel/LTSEnablementStack).
 
 
@@ -102,6 +105,11 @@ To do so, you typically need to edit your bootloader configuration
 (under Ubuntu for example in `/etc/default/grub`, line `GRUB_CMDLINE_LINUX`),
 update the bootloader (`sudo update-grub`), and reboot.
 
+In some debian kernels (and those derived from them, e.g. Raspberry Pi kernel),
+memory cgroup controller should be disabled by default, and can be enabled with
+`cgroup_enable=memory` option on the kernel command line, similar to
+`swapaccount=1` above.
+
 All the above requirements can be checked easily by running
 
     python3 -m benchexec.check_cgroups
@@ -136,43 +144,37 @@ The following steps are necessary:
    This setting needs a reboot to take effect,
    and [potentially a regeneration of your initramdisk](http://www.freedesktop.org/software/systemd/man/systemd-system.conf.html#Options).
 
- * Put the following into a file `/usr/local/sbin/benchexec-cgroup.sh`.
-   By default, this gives permissions to use the BenchExec cgroup
-   to users of the group `benchexec`, please adjust this as necessary.
-   Do not forget to make the file executable.
-```
-#!/bin/bash
-# Fill in set of allowed CPUs and memory regions (default is empty).
-cp /sys/fs/cgroup/cpuset/cpuset.cpus /sys/fs/cgroup/cpuset/system.slice/
-cp /sys/fs/cgroup/cpuset/cpuset.mems /sys/fs/cgroup/cpuset/system.slice/
-cp /sys/fs/cgroup/cpuset/cpuset.cpus /sys/fs/cgroup/cpuset/system.slice/benchexec-cgroup.service/
-cp /sys/fs/cgroup/cpuset/cpuset.mems /sys/fs/cgroup/cpuset/system.slice/benchexec-cgroup.service/
-
-echo $$ > /sys/fs/cgroup/cpuset/system.slice/benchexec-cgroup.service/tasks
-
-# Adjust permissions of cgroup (change as appropriate for you).
-chgrp -vR benchexec /sys/fs/cgroup/*/system.slice/benchexec-cgroup.service/
-chmod -vR g+w /sys/fs/cgroup/*/system.slice/benchexec-cgroup.service/
-
-# Sleep for 10 years.
-exec sleep $(( 10 * 365 * 24 * 3600 ))
-```
-
  * Put the following into a file `/etc/systemd/system/benchexec-cgroup.service`
-   and enable the service with `systemctl daemon-reload; systemctl enable benchexec-cgroup; systemctl start benchexec-cgroup`:
+   and enable the service with `systemctl enable benchexec-cgroup; systemctl start benchexec-cgroup`.
+
+   By default, this gives permissions to use the BenchExec cgroup to users of
+   the group `benchexec`, please adjust this as necessary or create this group
+   by running `groupadd benchexec` command beforehand.
+
+
 ```
 [Unit]
-Description=Cgroup for BenchExec
+Description=Cgroup setup for BenchExec
 Documentation=https://github.com/sosy-lab/benchexec/blob/master/doc/INSTALL.md
 Documentation=https://github.com/sosy-lab/benchexec/blob/master/doc/INDEX.md
 
 [Service]
-Type=simple
-ExecStart=/usr/local/sbin/benchexec-cgroup.sh
 Restart=always
 Delegate=true
 CPUAccounting=true
 MemoryAccounting=true
+
+ExecStart=/bin/bash -c '\
+set -e;\
+cd /sys/fs/cgroup/cpuset/;\
+cp cpuset.cpus system.slice/;\
+cp cpuset.mems system.slice/;\
+cp cpuset.cpus system.slice/benchexec-cgroup.service/;\
+cp cpuset.mems system.slice/benchexec-cgroup.service/;\
+echo $$$$ > system.slice/benchexec-cgroup.service/tasks;\
+chgrp -R benchexec /sys/fs/cgroup/*/system.slice/benchexec-cgroup.service/;\
+chmod -R g+w /sys/fs/cgroup/*/system.slice/benchexec-cgroup.service/;\
+exec sleep $(( 10 * 365 * 24 * 3600 ))'
 
 [Install]
 WantedBy=multi-user.target

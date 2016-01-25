@@ -1,5 +1,24 @@
 #!/usr/bin/env python
 
+# BenchExec is a framework for reliable benchmarking.
+# This file is part of BenchExec.
+#
+# Copyright (C) 2007-2016  Dirk Beyer
+# All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
 import sys
 sys.dont_write_bytecode = True # prevent creation of .pyc files
 
@@ -80,18 +99,8 @@ def main(argv=None):
 
             statusVer   = result.findall('column[@title="status"]')[0]
             categoryVer = result.findall('column[@title="category"]')[0]
-            result.append(ET.Element('column', {
-                                'title':  'void-status',
-                                'value':  statusVer.get('value'),
-                                'hidden': statusVer.get('hidden','false')
-                                               }))
-            result.append(ET.Element('column', {
-                                'title':  'void-category',
-                                'value':  categoryVer.get('value'),
-                                'hidden': categoryVer.get('hidden','false')
-                                               }))
 
-            statusWit, categoryWit = ('', '')
+            statusWit, categoryWit = (None, None)
             i = 0
             for witnessSet in witnessSets:
                 i = i + 1
@@ -106,8 +115,9 @@ def main(argv=None):
                              })
                         result.append(newColumn)
                     witnessSet.pop(run)
-                    if not statusWit.startswith('false('):
-                        statusWit, categoryWit = getWitnessResult(witness)
+                    statusWitNew, categoryWitNew = getWitnessResult(witness)
+                    if statusWitNew.startswith('false(') or statusWit is None:
+                        statusWit, categoryWit = (statusWitNew, categoryWitNew)
             # Overwrite status with status from witness
             if isOverwrite:
                 result.findall('column[@title="status"]')[0].set('value', statusWit)

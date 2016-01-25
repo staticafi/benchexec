@@ -27,74 +27,13 @@ from decimal import Decimal
 import glob
 import json
 import logging
-import math
 import os
 
 import re
+from urllib.parse import quote as url_quote
 import tempita
 
 from benchexec import model
-
-DEFAULT_TIME_PRECISION = 3
-REGEX_SIGNIFICANT_DIGITS = re.compile('(\d+)\.?(0*(\d+))?')  # compile regular expression only once for later uses
-
-
-def enum(**enums):
-    return type('Enum', (), enums)
-
-
-class ColumnEnumType(object):
-
-    def __init__(self, type, name):
-        self.type = type
-        self.name = name
-
-    def get_type(self):
-        return self
-
-    def __str__(self):
-        return self.name
-
-    def __eq__(self, other):
-        return self.type == other.type
-
-class ColumnType(object):
-    column_types = enum(text=1, count=2, measure=3, status=4, main_status=5)
-    text = ColumnEnumType(column_types.text, 'text')
-    count = ColumnEnumType(column_types.count, 'count')
-    measure = ColumnEnumType(column_types.measure, 'measure')
-    status = ColumnEnumType(column_types.status, 'status')
-    main_status = ColumnEnumType(column_types.main_status, 'main_status')
-
-
-class ColumnCountType(object):
-    """
-    Column type 'Count', contains the column's unit.
-    """
-
-    def __init__(self, unit):
-        self.unit = unit
-
-    def get_type(self):
-        return ColumnType.count
-
-    def get_unit(self):
-        return self.unit
-
-
-class ColumnMeasureType(object):
-    """
-    Column type 'Measure', contains the column's unit and the largest amount of digits after the decimal point.
-    """
-    def __init__(self, unit, max_decimal_digits):
-        self.unit = unit
-        self.max_decimal_digits = max_decimal_digits
-
-    def get_type(self):
-        return ColumnType.measure
-
-    def get_unit(self):
-        return self.unit
 
 
 def get_file_list(shortFile):
@@ -151,13 +90,18 @@ def remove_unit(s):
 
 
 def create_link(runResult, base_dir, column):
-    if not column.href:
-        return os.path.relpath(runResult.log_file, base_dir)
     source_file = runResult.task_id[0]
-    href = model.substitute_vars([column.href], None, source_file)[0]
-    if href.startswith('http://'):
+    href = column.href or runResult.log_file
+
+    if href.startswith("http://") or href.startswith("https://"):
+        # quote special characters only in inserted variable values, not full URL
+        source_file = url_quote(source_file)
+        href = model.substitute_vars([href], None, source_file)[0]
         return href
-    return os.path.join(base_dir, href)
+
+    # quote special characters everywhere (but not twice in source_file!)
+    href = model.substitute_vars([href], None, source_file)[0]
+    return url_quote(os.path.relpath(href, base_dir))
 
 
 def format_options(options):
@@ -165,124 +109,15 @@ def format_options(options):
     # split on one of the following tokens: ' -' or '[[' or ']]'
     lines = ['']
     for token in re.split('( -|\[\[|\]\])', options):
-      if token in ['[[',']]']:
-        lines.append(token)
-        lines.append('')
-      elif token == ' -':
-        lines.append(token)
-      else:
-        lines[-1] += token
+        if token in ['[[',']]']:
+            lines.append(token)
+            lines.append('')
+        elif token == ' -':
+            lines.append(token)
+        else:
+            lines[-1] += token
     # join all non-empty lines and wrap them into 'span'-tags
     return '<span style="display:block">' + '</span><span style="display:block">'.join(line for line in lines if line.strip()) + '</span>'
-
-
-def get_format_dummy(format_target):
-    if format_target == "csv":
-        return ''
-    else:
-        return '-'
-
-
-def format_number_align(formattedValue, max_number_of_dec_digits):
-    alignment = max_number_of_dec_digits
-    if formattedValue.find('.') >= 0:
-        # Subtract spaces for digits after the decimal point.
-        alignment -= len(formattedValue) - formattedValue.find('.') - 1
-    elif max_number_of_dec_digits > 0:
-        # Add punctuation space.
-        formattedValue += '&#x2008;'
-    formattedValue += "".join(['&#x2007;'] * alignment)
-    return formattedValue
-
-
-def is_no_value(value):
-    return not value or value == '' or value == '-'
-
-
-def format_number(s, number_of_significant_digits, max_digits_after_decimal, isToAlign=False, format_target='html'):
-    """
-    If the value is a number (or number followed by a unit),
-    this function returns a string-representation of the number
-    with the specified number of significant digits,
-    optionally aligned at the decimal point.
-
-    If the value is not a number, it is returned unchanged.
-    """
-    if is_no_value(s):
-        return get_format_dummy(format_target)
-
-    # If the number ends with "s" or another unit, remove it.
-    # Units should not occur in table cells, but in the table head.
-    value = remove_unit((str(s)).strip())
-    try:
-        # Round to the given amount of significant digits
-        #   (unfortunately this keeps the '.0' for large numbers and removes too many zeros from the end).
-        floatValue = float("{value:.{digits}g}".format(digits=number_of_significant_digits, value=float(value)))
-        formattedValue = str(floatValue)
-        import math
-        if floatValue >= math.pow(10, number_of_significant_digits - 1) or float(value) == floatValue:
-            # There are no correct significant digits after the decimal point, thus remove the zeros after the point.
-            formattedValue = str(round(floatValue))
-
-        else:
-            # If the value was rounded and zeros at the end were cut,
-            # we need to fill the missing zeros at the end because they are significant!
-            # Regular expression returns three groups:
-            # Group 1: Digits in front of decimal point
-            # Group 2: Digits after decimal point
-            # Group 3: Digits after decimal point starting at the first value not 0
-            # Use these groups to compute the number of zeroes that have to be added to the current number's
-            # decimal positions.
-            m = REGEX_SIGNIFICANT_DIGITS.match(formattedValue)
-            if int(m.group(1)) == 0:
-                zerosToAdd = number_of_significant_digits - len(m.group(3))
-            else:
-                zerosToAdd = number_of_significant_digits - len(m.group(1)) - len(m.group(2))
-            formattedValue += "".join(['0'] * zerosToAdd)
-
-        # Cut the 0 in front of the decimal point for values < 1.
-        # Example: 0.002 => .002
-        if format_target == "html_cell" and float(formattedValue) < 1 and float(formattedValue) != 0:
-            assert formattedValue[0] == '0'
-            formattedValue = formattedValue[1:]
-
-        # Alignment
-        if isToAlign:
-            formattedValue = format_number_align(formattedValue, max_digits_after_decimal)
-        return formattedValue
-    except ValueError: # If value is no float, don't format it.
-        return s
-
-
-def format_value(value, column, isToAlign=False, format_target="html"):
-    """
-    Format a value nicely for human-readable output (including rounding).
-
-    @param value: the value to format
-    @param column: a Column object describing the column the value is a part of.
-        This given Column is used to derive information about proper formatting.
-    @param isToAlign: if True, spaces will be added to the returned String representation to align it to all
-        other values in this column, correctly
-    @return: a formatted String representation of the given value.
-    """
-    if is_no_value(value):
-        return get_format_dummy(format_target)
-
-    if column.type.get_type() is ColumnType.measure:
-
-        number_of_significant_digits = column.number_of_significant_digits
-        if number_of_significant_digits is None and format_target is not "csv":
-            number_of_significant_digits = DEFAULT_TIME_PRECISION
-        max_dec_digits = column.type.max_decimal_digits
-
-        if number_of_significant_digits is not None:
-            return format_number(value, int(number_of_significant_digits), int(max_dec_digits), isToAlign, format_target)
-        else:
-            return value
-
-    else:
-        return value
-
 
 def to_decimal(s):
     # remove whitespaces and trailing units (e.g., in '1.23s')

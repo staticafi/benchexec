@@ -42,33 +42,51 @@ CATEGORY_MISSING = 'missing'
 because no property was defined, and no other categories apply."""
 
 
-# property names used in this module (should not contain spaces)
+# internal property names used in this module (should not contain spaces)
+# previously used by SV-COMP (http://sv-comp.sosy-lab.org/2014/rules.php):
 _PROP_LABEL =        'unreach-label'
+# currently used by SV-COMP (http://sv-comp.sosy-lab.org/2016/rules.php):
 _PROP_CALL =         'unreach-call'
 _PROP_TERMINATION =  'termination'
+_PROP_OVERFLOW =     'no-overflow'
 _PROP_DEREF =        'valid-deref'
 _PROP_FREE =         'valid-free'
 _PROP_MEMTRACK =     'valid-memtrack'
+# for Java verification:
 _PROP_ASSERT =       'assert'
+# specification given as an automaton:
 _PROP_AUTOMATON =    'observer-automaton'
+# for solvers:
 _PROP_SAT =          'sat'
-_PROP_OVERFLOW =     'no-overflow'
 
 STR_FALSE = 'false' # only for special cases. STR_FALSE is no official result, because property is missing
 
 # possible run results (output of a tool)
 RESULT_UNKNOWN =            'unknown'
+"""tool could not find out an answer due to incompleteness"""
 RESULT_ERROR =              'ERROR' # or any other value not listed here
+"""tool could not complete due to an error
+(it is recommended to instead use a string with more details about the error)"""
 RESULT_TRUE_PROP =          'true'
+"""property holds"""
 RESULT_FALSE_REACH =        STR_FALSE + '(reach)'
+"""SV-COMP reachability property violated"""
 RESULT_FALSE_TERMINATION =  STR_FALSE + '(' + _PROP_TERMINATION + ')'
-RESULT_FALSE_DEREF =        STR_FALSE + '(' + _PROP_DEREF       + ')'
-RESULT_FALSE_FREE =         STR_FALSE + '(' + _PROP_FREE        + ')'
-RESULT_FALSE_MEMTRACK =     STR_FALSE + '(' + _PROP_MEMTRACK    + ')'
-RESULT_WITNESS_CONFIRMED =  'witness confirmed'
-RESULT_SAT =                'sat'
-RESULT_UNSAT =              'unsat'
+"""SV-COMP termination property violated"""
 RESULT_FALSE_OVERFLOW =     STR_FALSE + '(' + _PROP_OVERFLOW    + ')'
+"""SV-COMP overflow property violated"""
+RESULT_FALSE_DEREF =        STR_FALSE + '(' + _PROP_DEREF       + ')'
+"""SV-COMP valid-deref property violated"""
+RESULT_FALSE_FREE =         STR_FALSE + '(' + _PROP_FREE        + ')'
+"""SV-COMP valid-free property violated"""
+RESULT_FALSE_MEMTRACK =     STR_FALSE + '(' + _PROP_MEMTRACK    + ')'
+"""SV-COMP valid-memtrack property violated"""
+RESULT_WITNESS_CONFIRMED =  'witness confirmed'
+"""SV-COMP property violated and witness confirmed"""
+RESULT_SAT =                'sat'
+"""task is satisfiable"""
+RESULT_UNSAT =              'unsat'
+"""task is unsatisfiable"""
 
 # List of all possible results.
 # If a result is not in this list, it is handled as RESULT_CLASS_ERROR.
@@ -124,6 +142,20 @@ _FILE_RESULTS = {
               '_sat':                  (RESULT_SAT,   {_PROP_SAT}),
               '_unsat':                (RESULT_UNSAT, {_PROP_SAT}),
               }
+
+# Map a property to all possible results for it.
+_VALID_RESULTS_PER_PROPERTY = {
+    _PROP_ASSERT:      {RESULT_TRUE_PROP, RESULT_FALSE_REACH},
+    _PROP_LABEL:       {RESULT_TRUE_PROP, RESULT_FALSE_REACH},
+    _PROP_CALL:        {RESULT_TRUE_PROP, RESULT_FALSE_REACH},
+    _PROP_AUTOMATON:   {RESULT_TRUE_PROP, RESULT_FALSE_REACH},
+    _PROP_DEREF:       {RESULT_TRUE_PROP, RESULT_FALSE_DEREF},
+    _PROP_FREE:        {RESULT_TRUE_PROP, RESULT_FALSE_FREE},
+    _PROP_MEMTRACK:    {RESULT_TRUE_PROP, RESULT_FALSE_MEMTRACK},
+    _PROP_OVERFLOW:    {RESULT_TRUE_PROP, RESULT_FALSE_OVERFLOW},
+    _PROP_TERMINATION: {RESULT_TRUE_PROP, RESULT_FALSE_TERMINATION},
+    _PROP_SAT:         {RESULT_SAT, RESULT_UNSAT},
+    }
 
 # Score values taken from http://sv-comp.sosy-lab.org/
 # If different scores should be used depending on the checked property,
@@ -196,21 +228,39 @@ def satisfies_file_property(filename, properties):
     return None
 
 
-def score_for_task(filename, properties, category):
+def score_for_task(filename, properties, category, result):
     """
     Return the possible score of task, depending on whether the result is correct or not.
+    Pass category=result.CATEGORY_CORRECT and result=None to calculate the maximum possible score.
     """
     if category != CATEGORY_CORRECT and category != CATEGORY_WRONG:
         return 0
     if _PROP_SAT in properties:
         return 0
+
     correct = (category == CATEGORY_CORRECT)
     expected = satisfies_file_property(filename, properties)
     if expected is None:
         return 0
     elif expected == True:
+        # expected result is "true", result was "true" or "false"
         return _SCORE_CORRECT_TRUE if correct else _SCORE_WRONG_FALSE
     elif expected == False:
+        if correct:
+            # expected result is "false", result was "false" with correct property
+            return _SCORE_CORRECT_FALSE
+        else:
+            assert result, "Cannot compute score without actual tool result"
+            result_class = get_result_classification(result)
+            if result_class == RESULT_CLASS_TRUE:
+                # expected result is "false", result was "true"
+                return _SCORE_WRONG_TRUE
+            elif result_class == RESULT_CLASS_FALSE:
+                # expected result is "false", result was "false" but with wrong property
+                return _SCORE_WRONG_FALSE
+            else:
+                assert False, "unexpected result classification " + result_class + " for result " + result
+
         return _SCORE_CORRECT_FALSE if correct else _SCORE_WRONG_TRUE
     else:
         assert False, "unexpected return value from satisfies_file_property: " + expected
@@ -248,6 +298,8 @@ def get_result_category(filename, result, properties):
     @param properties: The list of properties to check (as returned by properties_of_file()).
     @return One of the CATEGORY_* strings.
     '''
+    assert set(properties).issubset(_VALID_RESULTS_PER_PROPERTY.keys())
+
     if result not in RESULT_LIST:
         return CATEGORY_ERROR
 
@@ -267,8 +319,11 @@ def get_result_category(filename, result, properties):
     if not expected_result:
         # filename gives no hint on the expected output
         return CATEGORY_MISSING
-    else:
-        if expected_result == result:
-            return CATEGORY_CORRECT
-        else:
-            return CATEGORY_WRONG
+
+    for prop in properties:
+        if result in _VALID_RESULTS_PER_PROPERTY[prop]:
+            # tool returned an answer for this property
+            return CATEGORY_CORRECT if expected_result == result else CATEGORY_WRONG
+
+    # tool returned an answer that does not belong to any of the checked properties
+    return CATEGORY_UNKNOWN
